@@ -20,6 +20,7 @@ class EnvState(pydantic.BaseModel):
     # The screenshot in PNG format.
     screenshot: bytes
     url: str
+    bsession: str | None = None
 
 
 class Computer(abc.ABC):

@@ -411,13 +411,28 @@ class PlaywrightComputer(Computer):
         self._page.mouse.up()
         return self.current_state()
 
+    def _current_bsession_value(self) -> str | None:
+        try:
+            cookies = self._context.cookies([self._page.url])
+        except Exception:
+            return None
+
+        for cookie in cookies:
+            if cookie.get("name") == "bSession":
+                return cookie.get("value")
+        return None
+
     def current_state(self) -> EnvState:
         self._page.wait_for_load_state()
         # Even if Playwright reports the page as loaded, it may not be so.
         # Add a manual sleep to make sure the page has finished rendering.
         time.sleep(0.5)
         screenshot_bytes = self._page.screenshot(type="png", full_page=False)
-        return EnvState(screenshot=screenshot_bytes, url=self._page.url)
+        return EnvState(
+            screenshot=screenshot_bytes,
+            url=self._page.url,
+            bsession=self._current_bsession_value(),
+        )
 
     def screen_size(self) -> tuple[int, int]:
         viewport_size = self._page.viewport_size

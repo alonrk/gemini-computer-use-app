@@ -403,20 +403,24 @@ class BrowserAgent:
                     raise
             if isinstance(fc_result, EnvState):
                 self._last_url = fc_result.url
+                event_data = {
+                    **self._serialize_function_call(function_call),
+                    "status": "completed",
+                    "url": fc_result.url,
+                }
+                if fc_result.bsession:
+                    event_data["bSession"] = fc_result.bsession
                 self._emit_event(
                     "function_call_finished",
                     f"Completed {function_call.name}.",
-                    {
-                        **self._serialize_function_call(function_call),
-                        "status": "completed",
-                        "url": fc_result.url,
-                    },
+                    event_data,
                 )
                 function_responses.append(
                     FunctionResponse(
                         name=function_call.name,
                         response={
                             "url": fc_result.url,
+                            **({"bSession": fc_result.bsession} if fc_result.bsession else {}),
                             **extra_fr_fields,
                         },
                         parts=[

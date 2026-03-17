@@ -44,6 +44,18 @@ class TestPlaywrightComputerVisualFeedback(unittest.TestCase):
 
         self.assertNotIn("record_video_dir", options)
 
+    def test_current_bsession_value_reads_cookie_for_current_page(self):
+        computer = PlaywrightComputer(screen_size=(1440, 900))
+        computer._context = MagicMock()
+        computer._page = MagicMock()
+        computer._page.url = "https://example.com"
+        computer._context.cookies.return_value = [
+            {"name": "other", "value": "x"},
+            {"name": "bSession", "value": "cookie-value-123"},
+        ]
+
+        self.assertEqual(computer._current_bsession_value(), "cookie-value-123")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -120,6 +120,8 @@ class TestBrowserAgent(unittest.TestCase):
         self.assertEqual(result, "CONTINUE")
         mock_handle_action.assert_called_once_with(function_call)
         self.assertEqual(len(self.agent._contents), 3)
+        function_response = self.agent._contents[2].parts[0].function_response
+        self.assertEqual(function_response.response["url"], "https://example.com")
 
     @patch('agent.BrowserAgent.get_model_response')
     @patch('agent.BrowserAgent.handle_action')
@@ -160,6 +162,37 @@ class TestBrowserAgent(unittest.TestCase):
                 "function_call_finished",
             ],
         )
+
+    @patch('agent.BrowserAgent.get_model_response')
+    @patch('agent.BrowserAgent.handle_action')
+    def test_bsession_is_included_in_finished_action_event(self, mock_handle_action, mock_get_model_response):
+        events = []
+        agent = BrowserAgent(
+            browser_computer=self.mock_browser_computer,
+            query="test query",
+            model_name="test_model",
+            event_sink=events.append,
+            verbose=False,
+        )
+        agent._client = MagicMock()
+
+        mock_response = MagicMock()
+        function_call = types.FunctionCall(name="navigate", args={"url": "https://example.com"})
+        mock_candidate = MagicMock()
+        mock_candidate.content.parts = [types.Part(function_call=function_call)]
+        mock_response.candidates = [mock_candidate]
+        mock_get_model_response.return_value = mock_response
+        mock_handle_action.return_value = EnvState(
+            screenshot=b"screenshot",
+            url="https://example.com",
+            bsession="cookie-value-123",
+        )
+
+        result = agent.run_one_iteration()
+
+        self.assertEqual(result, "CONTINUE")
+        self.assertEqual(events[-1].type, "function_call_finished")
+        self.assertEqual(events[-1].data["bSession"], "cookie-value-123")
 
     @patch('agent.BrowserAgent.get_model_response')
     def test_safety_mode_terminate_emits_failure_event(self, mock_get_model_response):
