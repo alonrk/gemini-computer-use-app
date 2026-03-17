@@ -16,7 +16,7 @@ import os
 import unittest
 from unittest.mock import MagicMock, patch
 from google.genai import types
-from agent import BrowserAgent, multiply_numbers
+from agent import BrowserAgent
 from computers import EnvState
 
 class TestBrowserAgent(unittest.TestCase):
@@ -31,9 +31,6 @@ class TestBrowserAgent(unittest.TestCase):
             model_name="test_model"
         )
         self.agent._client = MagicMock()
-
-    def test_multiply_numbers(self):
-        self.assertEqual(multiply_numbers(2, 3), {"result": 6})
 
     def test_handle_action_open_web_browser(self):
         action = types.FunctionCall(name="open_web_browser", args={})
@@ -75,7 +72,7 @@ class TestBrowserAgent(unittest.TestCase):
 
     @patch("agent.genai.Client")
     def test_api_key_is_passed_directly(self, mock_client):
-        BrowserAgent(
+        agent = BrowserAgent(
             browser_computer=self.mock_browser_computer,
             query="test query",
             model_name="test_model",
@@ -88,6 +85,8 @@ class TestBrowserAgent(unittest.TestCase):
             project=None,
             location=None,
         )
+        self.assertEqual(len(agent._generate_content_config.tools), 1)
+        self.assertIsNotNone(agent._generate_content_config.tools[0].computer_use)
 
     @patch('agent.BrowserAgent.get_model_response')
     def test_run_one_iteration_no_function_calls(self, mock_get_model_response):
@@ -199,6 +198,46 @@ class TestBrowserAgent(unittest.TestCase):
             events[-1].data["reason"],
             "safety_confirmation_required",
         )
+
+    @patch('agent.BrowserAgent.get_model_response')
+    @patch('agent.BrowserAgent.handle_action')
+    def test_safety_mode_auto_accept_continues_without_prompt(self, mock_handle_action, mock_get_model_response):
+        events = []
+        agent = BrowserAgent(
+            browser_computer=self.mock_browser_computer,
+            query="test query",
+            model_name="test_model",
+            event_sink=events.append,
+            safety_mode="auto_accept",
+            verbose=False,
+        )
+        agent._client = MagicMock()
+
+        mock_response = MagicMock()
+        function_call = types.FunctionCall(
+            name="navigate",
+            args={
+                "url": "https://example.com",
+                "safety_decision": {
+                    "decision": "require_confirmation",
+                    "explanation": "Confirmation required.",
+                },
+            },
+        )
+        mock_candidate = MagicMock()
+        mock_candidate.content.parts = [types.Part(function_call=function_call)]
+        mock_response.candidates = [mock_candidate]
+        mock_get_model_response.return_value = mock_response
+        mock_handle_action.return_value = EnvState(
+            screenshot=b"screenshot",
+            url="https://example.com",
+        )
+
+        result = agent.run_one_iteration()
+
+        self.assertEqual(result, "CONTINUE")
+        mock_handle_action.assert_called_once_with(function_call)
+        self.assertEqual(events[-1].type, "function_call_finished")
 
 
 if __name__ == "__main__":

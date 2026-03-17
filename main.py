@@ -54,6 +54,12 @@ def main() -> int:
         default='gemini-2.5-computer-use-preview-10-2025',
         help="Set which main model to use.",
     )
+    parser.add_argument(
+        "--safety_mode",
+        choices=("interactive", "terminate", "auto_accept"),
+        default="auto_accept",
+        help="How to handle Gemini safety confirmation requests.",
+    )
     args = parser.parse_args()
 
     if args.env == "playwright":
@@ -75,6 +81,7 @@ def main() -> int:
             browser_computer=browser_computer,
             query=args.query,
             model_name=args.model,
+            safety_mode=args.safety_mode,
         )
         agent.agent_loop()
     return 0

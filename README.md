@@ -118,6 +118,7 @@ python web_app.py
 ```
 
 Then open `http://127.0.0.1:8000` in your browser, enter a Gemini API key and prompt, and click `Run`.
+Each Playwright session also records a browser video. After a run finishes, you can download it from the web UI, and the raw recording is saved under `artifacts/videos/`.
 
 **Browserbase**
 

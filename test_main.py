@@ -28,6 +28,7 @@ class TestMain(unittest.TestCase):
         mock_args.highlight_mouse = True
         mock_args.query = 'test_query'
         mock_args.model = 'test_model'
+        mock_args.safety_mode = 'auto_accept'
         mock_args.api_server = None
         mock_args.api_server_key = None
         mock_arg_parser.return_value.parse_args.return_value = mock_args
@@ -50,6 +51,7 @@ class TestMain(unittest.TestCase):
         mock_args.env = 'browserbase'
         mock_args.query = 'test_query'
         mock_args.model = 'test_model'
+        mock_args.safety_mode = 'auto_accept'
         mock_args.api_server = None
         mock_args.api_server_key = None
         mock_args.initial_url = 'test_url'

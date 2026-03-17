@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import threading
 from typing import Any
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from agent import BrowserAgent
@@ -130,6 +131,14 @@ INDEX_HTML = """<!DOCTYPE html>
       font-size: 1.2rem;
     }
 
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+
     label {
       display: block;
       margin-bottom: 16px;
@@ -180,6 +189,23 @@ INDEX_HTML = """<!DOCTYPE html>
       cursor: pointer;
       transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
       box-shadow: 0 14px 28px rgba(164, 71, 27, 0.28);
+    }
+
+    .button-row {
+      display: flex;
+      gap: 12px;
+      margin-top: 8px;
+    }
+
+    .button-row button {
+      margin-top: 0;
+    }
+
+    .secondary-button {
+      background: linear-gradient(180deg, rgba(255, 252, 245, 0.98), rgba(244, 237, 227, 0.98));
+      color: var(--ink);
+      border: 1px solid rgba(164, 71, 27, 0.22);
+      box-shadow: 0 10px 20px rgba(70, 40, 20, 0.08);
     }
 
     button:hover:not(:disabled) {
@@ -266,6 +292,11 @@ INDEX_HTML = """<!DOCTYPE html>
       animation: rise 220ms ease;
     }
 
+    .log-entry.browsing {
+      border-color: rgba(164, 71, 27, 0.2);
+      box-shadow: inset 0 0 0 1px rgba(164, 71, 27, 0.05);
+    }
+
     .log-entry strong {
       display: block;
       margin-bottom: 4px;
@@ -332,7 +363,9 @@ INDEX_HTML = """<!DOCTYPE html>
 
     <section class="layout">
       <section class="panel">
-        <h2>Start Session</h2>
+        <div class="section-head">
+          <h2>Start Session</h2>
+        </div>
         <form id="run-form">
           <label for="api-key">
             Gemini API key
@@ -345,7 +378,11 @@ INDEX_HTML = """<!DOCTYPE html>
             <textarea id="prompt" name="prompt" placeholder="Go to Google and search for the latest AI news." required></textarea>
           </label>
 
-          <button id="run-button" type="submit">Run</button>
+          <div class="button-row">
+            <button id="run-button" type="submit">Run</button>
+            <button id="export-button" class="secondary-button" type="button">Export Log</button>
+            <button id="video-button" class="secondary-button" type="button" disabled>Download Video</button>
+          </div>
         </form>
       </section>
 
@@ -367,7 +404,11 @@ INDEX_HTML = """<!DOCTYPE html>
 
   <script>
     const form = document.getElementById("run-form");
+    const apiKeyInput = document.getElementById("api-key");
+    const promptInput = document.getElementById("prompt");
     const runButton = document.getElementById("run-button");
+    const exportButton = document.getElementById("export-button");
+    const videoButton = document.getElementById("video-button");
     const statusBadge = document.getElementById("status-badge");
     const statusMessage = document.getElementById("status-message");
     const lastUrl = document.getElementById("last-url");
@@ -375,6 +416,10 @@ INDEX_HTML = """<!DOCTYPE html>
     const logEmpty = document.getElementById("log-empty");
     const seenSequences = new Set();
     let socket;
+    const STORAGE_KEYS = {
+      apiKey: "computer-use-ui.api-key",
+      prompt: "computer-use-ui.prompt"
+    };
 
     function formatData(data) {
       if (!data) {
@@ -397,6 +442,9 @@ INDEX_HTML = """<!DOCTYPE html>
       );
       lastUrl.textContent = snapshot.last_url ? `Last URL: ${snapshot.last_url}` : "";
       runButton.disabled = Boolean(snapshot.active);
+      if (typeof snapshot.has_video === "boolean") {
+        videoButton.disabled = !snapshot.has_video;
+      }
     }
 
     function appendEvent(event) {
@@ -409,9 +457,11 @@ INDEX_HTML = """<!DOCTYPE html>
       }
 
       logEmpty.hidden = true;
-
       const item = document.createElement("li");
       item.className = "log-entry";
+      if (event.type === "function_call_started" || event.type === "function_call_finished") {
+        item.classList.add("browsing");
+      }
 
       const title = document.createElement("strong");
       title.textContent = `${event.type}: ${event.message}`;
@@ -432,6 +482,7 @@ INDEX_HTML = """<!DOCTYPE html>
 
       logList.appendChild(item);
       logList.scrollTop = logList.scrollHeight;
+
     }
 
     async function loadSnapshot() {
@@ -449,11 +500,13 @@ INDEX_HTML = """<!DOCTYPE html>
         appendEvent(event);
         updateStatus({
           status: event.type === "session_failed" ? "error" :
+                  event.type === "video_ready" ? statusBadge.textContent :
                   event.type === "session_completed" ? "completed" :
                   event.type === "session_started" ? "running" : statusBadge.textContent,
           result_message: event.message,
           last_url: event.data && event.data.url ? event.data.url : lastUrl.textContent.replace(/^Last URL:\\s*/, ""),
-          active: !["session_completed", "session_failed"].includes(event.type)
+          active: !["session_completed", "session_failed"].includes(event.type),
+          has_video: event.type === "video_ready" ? true : undefined
         });
       });
 
@@ -462,10 +515,63 @@ INDEX_HTML = """<!DOCTYPE html>
       });
     }
 
+    async function exportLog() {
+      const response = await fetch("/api/log/export");
+      if (!response.ok) {
+        throw new Error("Unable to export the current log.");
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "computer-use-log.json";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    async function downloadVideo() {
+      const response = await fetch("/api/video/latest");
+      if (!response.ok) {
+        throw new Error("No captured browser video is available yet.");
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const match = disposition.match(/filename="([^"]+)"/);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = match ? match[1] : "computer-use-session.webm";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function restoreSavedInputs() {
+      const savedApiKey = window.localStorage.getItem(STORAGE_KEYS.apiKey);
+      const savedPrompt = window.localStorage.getItem(STORAGE_KEYS.prompt);
+
+      if (savedApiKey) {
+        apiKeyInput.value = savedApiKey;
+      }
+      if (savedPrompt) {
+        promptInput.value = savedPrompt;
+      }
+    }
+
+    function saveInputs() {
+      window.localStorage.setItem(STORAGE_KEYS.apiKey, apiKeyInput.value);
+      window.localStorage.setItem(STORAGE_KEYS.prompt, promptInput.value);
+    }
+
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const apiKey = document.getElementById("api-key").value.trim();
-      const prompt = document.getElementById("prompt").value.trim();
+      const apiKey = apiKeyInput.value.trim();
+      const prompt = promptInput.value.trim();
 
       if (!apiKey || !prompt) {
         statusMessage.textContent = "A Gemini API key and prompt are both required.";
@@ -475,6 +581,7 @@ INDEX_HTML = """<!DOCTYPE html>
       }
 
       try {
+        saveInputs();
         runButton.disabled = true;
         seenSequences.clear();
         logList.innerHTML = "";
@@ -499,6 +606,30 @@ INDEX_HTML = """<!DOCTYPE html>
       }
     });
 
+    apiKeyInput.addEventListener("input", saveInputs);
+    promptInput.addEventListener("input", saveInputs);
+
+    exportButton.addEventListener("click", async () => {
+      try {
+        await exportLog();
+      } catch (error) {
+        statusBadge.textContent = "error";
+        statusBadge.className = "badge error";
+        statusMessage.textContent = error.message;
+      }
+    });
+
+    videoButton.addEventListener("click", async () => {
+      try {
+        await downloadVideo();
+      } catch (error) {
+        statusBadge.textContent = "error";
+        statusBadge.className = "badge error";
+        statusMessage.textContent = error.message;
+      }
+    });
+
+    restoreSavedInputs();
     loadSnapshot();
     connectEvents();
   </script>
@@ -523,6 +654,8 @@ class SessionManager:
         self._listeners: set[asyncio.Queue[dict[str, Any]]] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._sequence = 0
+        self._current_action: dict[str, Any] | None = None
+        self._last_video_path: str | None = None
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -531,6 +664,23 @@ class SessionManager:
                 "active": self._thread is not None and self._thread.is_alive(),
                 "last_url": self._last_url,
                 "result_message": self._result_message,
+                "event_count": len(self._events),
+                "current_action": self._current_action,
+                "has_video": bool(self._last_video_path and Path(self._last_video_path).exists()),
+            }
+
+    def export_payload(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "session": {
+                    "status": self._status,
+                    "last_url": self._last_url,
+                    "result_message": self._result_message,
+                    "event_count": len(self._events),
+                    "current_action": self._current_action,
+                    "video_path": self._last_video_path,
+                },
+                "events": [event.to_dict() for event in self._events],
             }
 
     def start_session(self, api_key: str, prompt: str, model_name: str = DEFAULT_MODEL):
@@ -548,6 +698,8 @@ class SessionManager:
             self._status = "running"
             self._result_message = "Starting session..."
             self._last_url = None
+            self._current_action = None
+            self._last_video_path = None
             self._events = []
             self._sequence = 0
             self._thread = threading.Thread(
@@ -574,7 +726,10 @@ class SessionManager:
 
     def _run_session(self, api_key: str, prompt: str, model_name: str):
         try:
-            env = PlaywrightComputer(screen_size=PLAYWRIGHT_SCREEN_SIZE)
+            env = PlaywrightComputer(
+                screen_size=PLAYWRIGHT_SCREEN_SIZE,
+                highlight_mouse=True,
+            )
             with env as browser_computer:
                 agent = BrowserAgent(
                     browser_computer=browser_computer,
@@ -582,11 +737,13 @@ class SessionManager:
                     model_name=model_name,
                     api_key=api_key,
                     event_sink=self._publish,
-                    safety_mode="terminate",
+                    safety_mode="auto_accept",
                     verbose=False,
                 )
                 agent.agent_loop()
+            self._set_video_path(env.latest_video_path)
         except Exception as exc:
+            self._set_video_path(env.latest_video_path if "env" in locals() else None)
             if self.snapshot()["status"] not in {"completed", "error"}:
                 self._publish(
                     build_event(
@@ -598,6 +755,25 @@ class SessionManager:
         finally:
             with self._lock:
                 self._thread = None
+
+    def _set_video_path(self, video_path: str | None):
+        should_publish = False
+        with self._lock:
+            previous_path = self._last_video_path
+            self._last_video_path = video_path
+            should_publish = bool(
+                video_path
+                and video_path != previous_path
+                and Path(video_path).exists()
+            )
+        if should_publish:
+            self._publish(
+                build_event(
+                    "video_ready",
+                    "Browser video is ready to download.",
+                    {"video_path": video_path},
+                )
+            )
 
     def _publish(self, event: ActionEvent):
         payload = event.to_dict()
@@ -626,20 +802,30 @@ class SessionManager:
         if event.type == "session_started":
             self._status = "running"
             self._result_message = event.message
+            self._current_action = None
+        elif event.type == "function_call_started":
+            self._current_action = {
+                "name": event.data.get("name"),
+                "message": event.message,
+                "timestamp": event.timestamp,
+            }
         elif event.type == "function_call_finished":
             if url := event.data.get("url"):
                 self._last_url = url
             self._result_message = event.message
+            self._current_action = None
         elif event.type == "model_reasoning":
             self._result_message = event.message
         elif event.type == "session_completed":
             self._status = "completed"
             self._result_message = event.message
+            self._current_action = None
             if url := event.data.get("url"):
                 self._last_url = url
         elif event.type == "session_failed":
             self._status = "error"
             self._result_message = event.message
+            self._current_action = None
             if url := event.data.get("url"):
                 self._last_url = url
 
@@ -656,6 +842,26 @@ def create_app(session_manager: SessionManager | None = None) -> FastAPI:
     @app.get("/api/session")
     async def get_session() -> dict[str, Any]:
         return manager.snapshot()
+
+    @app.get("/api/log/export")
+    async def export_log() -> JSONResponse:
+        return JSONResponse(
+            content=manager.export_payload(),
+            headers={
+                "Content-Disposition": 'attachment; filename="computer-use-log.json"'
+            },
+        )
+
+    @app.get("/api/video/latest")
+    async def latest_video() -> FileResponse:
+        video_path = manager.export_payload()["session"].get("video_path")
+        if not video_path or not Path(video_path).exists():
+            raise HTTPException(status_code=404, detail="No captured browser video is available.")
+        return FileResponse(
+            path=video_path,
+            media_type="video/webm",
+            filename=Path(video_path).name,
+        )
 
     @app.post("/api/run", status_code=202)
     async def run_session(request: RunRequest) -> dict[str, Any]:
@@ -676,7 +882,7 @@ def create_app(session_manager: SessionManager | None = None) -> FastAPI:
             while True:
                 payload = await queue.get()
                 await websocket.send_json(payload)
-        except WebSocketDisconnect:
+        except (WebSocketDisconnect, asyncio.CancelledError):
             pass
         finally:
             await manager.unregister_listener(queue)

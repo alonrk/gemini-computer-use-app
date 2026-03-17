@@ -51,15 +51,9 @@ PREDEFINED_COMPUTER_USE_FUNCTIONS = [
 
 console = Console()
 
-# Built-in Computer Use tools will return "EnvState".
-# Custom provided functions will return "dict".
-FunctionResponseT = Union[EnvState, dict]
+# Built-in Computer Use tools return "EnvState".
+FunctionResponseT = EnvState
 EventSinkT = Callable[[ActionEvent], None]
-
-
-def multiply_numbers(x: float, y: float) -> dict:
-    """Multiplies two numbers."""
-    return {"result": x * y}
 
 
 class BrowserAgent:
@@ -70,7 +64,7 @@ class BrowserAgent:
         model_name: str,
         api_key: str | None = None,
         event_sink: EventSinkT | None = None,
-        safety_mode: Literal["interactive", "terminate"] = "interactive",
+        safety_mode: Literal["interactive", "terminate", "auto_accept"] = "interactive",
         verbose: bool = True,
     ):
         self._browser_computer = browser_computer
@@ -99,14 +93,6 @@ class BrowserAgent:
         # Exclude any predefined functions here.
         excluded_predefined_functions = []
 
-        # Add your own custom functions here.
-        custom_functions = [
-            # For example:
-            types.FunctionDeclaration.from_callable(
-                client=self._client, callable=multiply_numbers
-            )
-        ]
-
         self._generate_content_config = GenerateContentConfig(
             temperature=1,
             top_p=0.95,
@@ -119,7 +105,6 @@ class BrowserAgent:
                         excluded_predefined_functions=excluded_predefined_functions,
                     ),
                 ),
-                types.Tool(function_declarations=custom_functions),
             ],
             thinking_config=types.ThinkingConfig(
                 include_thoughts=True
@@ -213,9 +198,6 @@ class BrowserAgent:
                 destination_x=destination_x,
                 destination_y=destination_y,
             )
-        # Handle the custom function declarations here.
-        elif action.name == multiply_numbers.__name__:
-            return multiply_numbers(x=action.args["x"], y=action.args["y"])
         else:
             raise ValueError(f"Unsupported function: {action}")
 
@@ -446,20 +428,6 @@ class BrowserAgent:
                         ],
                     )
                 )
-            elif isinstance(fc_result, dict):
-                self._emit_event(
-                    "function_call_finished",
-                    f"Completed {function_call.name}.",
-                    {
-                        **self._serialize_function_call(function_call),
-                        "status": "completed",
-                        "result": fc_result,
-                    },
-                )
-                function_responses.append(
-                    FunctionResponse(name=function_call.name, response=fc_result)
-                )
-
         self._contents.append(
             Content(
                 role="user",
@@ -503,6 +471,8 @@ class BrowserAgent:
     ) -> Literal["CONTINUE", "TERMINATE"]:
         if safety["decision"] != "require_confirmation":
             raise ValueError(f"Unknown safety decision: safety['decision']")
+        if self._safety_mode == "auto_accept":
+            return "CONTINUE"
         if self._safety_mode == "terminate":
             return "TERMINATE"
         termcolor.cprint(
