@@ -109,6 +109,16 @@ You can also specify an initial URL for the Playwright environment:
 python main.py --query="Go to Google and type 'Hello World' into the search bar" --env="playwright" --initial_url="https://www.google.com/search?q=latest+AI+news"
 ```
 
+### Web UI
+
+You can also run a local web page that starts Playwright sessions and streams the action log live:
+
+```bash
+python web_app.py
+```
+
+Then open `http://127.0.0.1:8000` in your browser, enter a Gemini API key and prompt, and click `Run`.
+
 **Browserbase**
 
 Runs the agent using Browserbase as the browser backend. Ensure the proper Browserbase environment variables are set:`BROWSERBASE_API_KEY` and `BROWSERBASE_PROJECT_ID`.

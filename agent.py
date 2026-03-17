@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-from typing import Literal, Optional, Union, Any
+from typing import Callable, Literal, Optional, Union, Any
 from google import genai
 from google.genai import types
 import termcolor
@@ -29,6 +29,7 @@ from rich.console import Console
 from rich.table import Table
 
 from computers import EnvState, Computer
+from events import ActionEvent, build_event
 
 MAX_RECENT_TURN_WITH_SCREENSHOTS = 3
 PREDEFINED_COMPUTER_USE_FUNCTIONS = [
@@ -53,6 +54,7 @@ console = Console()
 # Built-in Computer Use tools will return "EnvState".
 # Custom provided functions will return "dict".
 FunctionResponseT = Union[EnvState, dict]
+EventSinkT = Callable[[ActionEvent], None]
 
 
 def multiply_numbers(x: float, y: float) -> dict:
@@ -66,15 +68,21 @@ class BrowserAgent:
         browser_computer: Computer,
         query: str,
         model_name: str,
+        api_key: str | None = None,
+        event_sink: EventSinkT | None = None,
+        safety_mode: Literal["interactive", "terminate"] = "interactive",
         verbose: bool = True,
     ):
         self._browser_computer = browser_computer
         self._query = query
         self._model_name = model_name
+        self._event_sink = event_sink
+        self._safety_mode = safety_mode
         self._verbose = verbose
         self.final_reasoning = None
+        self._last_url: str | None = None
         self._client = genai.Client(
-            api_key=os.environ.get("GEMINI_API_KEY"),
+            api_key=api_key or os.environ.get("GEMINI_API_KEY"),
             vertexai=os.environ.get("USE_VERTEXAI", "0").lower() in ["true", "1"],
             project=os.environ.get("VERTEXAI_PROJECT"),
             location=os.environ.get("VERTEXAI_LOCATION"),
@@ -117,6 +125,21 @@ class BrowserAgent:
                 include_thoughts=True
             ),
         )
+
+    def _emit_event(
+        self, event_type: str, message: str, data: dict[str, Any] | None = None
+    ):
+        if not self._event_sink:
+            return
+        self._event_sink(build_event(event_type, message, data))
+
+    def _serialize_function_call(
+        self, function_call: types.FunctionCall
+    ) -> dict[str, Any]:
+        return {
+            "name": function_call.name,
+            "args": dict(function_call.args or {}),
+        }
 
     def handle_action(self, action: types.FunctionCall) -> FunctionResponseT:
         """Handles the action and returns the environment state."""
@@ -256,11 +279,21 @@ class BrowserAgent:
                 try:
                     response = self.get_model_response()
                 except Exception as e:
+                    self._emit_event(
+                        "session_failed",
+                        "Failed to generate a model response.",
+                        {"error": str(e)},
+                    )
                     return "COMPLETE"
         else:
             try:
                 response = self.get_model_response()
             except Exception as e:
+                self._emit_event(
+                    "session_failed",
+                    "Failed to generate a model response.",
+                    {"error": str(e)},
+                )
                 return "COMPLETE"
 
         if not response.candidates:
@@ -276,6 +309,12 @@ class BrowserAgent:
 
         reasoning = self.get_text(candidate)
         function_calls = self.extract_function_calls(candidate)
+        if reasoning:
+            self._emit_event(
+                "model_reasoning",
+                reasoning,
+                {"reasoning": reasoning},
+            )
 
         # Retry the request in case of malformed FCs.
         if (
@@ -288,6 +327,11 @@ class BrowserAgent:
         if not function_calls:
             print(f"Agent Loop Complete: {reasoning}")
             self.final_reasoning = reasoning
+            self._emit_event(
+                "session_completed",
+                reasoning or "Session completed.",
+                {"final_reasoning": reasoning, "url": self._last_url},
+            )
             return "COMPLETE"
 
         function_call_strs = []
@@ -306,6 +350,16 @@ class BrowserAgent:
         )
         table.add_column("Function Call(s)", header_style="cyan", ratio=1)
         table.add_row(reasoning, "\n".join(function_call_strs))
+        self._emit_event(
+            "function_calls_planned",
+            f"Planned {len(function_calls)} function call(s).",
+            {
+                "function_calls": [
+                    self._serialize_function_call(function_call)
+                    for function_call in function_calls
+                ]
+            },
+        )
         if self._verbose:
             console.print(table)
             print()
@@ -319,17 +373,63 @@ class BrowserAgent:
                 decision = self._get_safety_confirmation(safety)
                 if decision == "TERMINATE":
                     print("Terminating agent loop")
+                    self._emit_event(
+                        "session_failed",
+                        safety["explanation"],
+                        {
+                            "reason": "safety_confirmation_required",
+                            "action": function_call.name,
+                            "safety": safety,
+                        },
+                    )
                     return "COMPLETE"
                 # Explicitly mark the safety check as acknowledged.
                 extra_fr_fields["safety_acknowledgement"] = "true"
+            self._emit_event(
+                "function_call_started",
+                f"Running {function_call.name}.",
+                self._serialize_function_call(function_call),
+            )
             if self._verbose:
                 with console.status(
                     "Sending command to Computer...", spinner_style=None
                 ):
-                    fc_result = self.handle_action(function_call)
+                    try:
+                        fc_result = self.handle_action(function_call)
+                    except Exception as exc:
+                        self._emit_event(
+                            "session_failed",
+                            f"Action {function_call.name} failed.",
+                            {
+                                **self._serialize_function_call(function_call),
+                                "error": str(exc),
+                            },
+                        )
+                        raise
             else:
-                fc_result = self.handle_action(function_call)
+                try:
+                    fc_result = self.handle_action(function_call)
+                except Exception as exc:
+                    self._emit_event(
+                        "session_failed",
+                        f"Action {function_call.name} failed.",
+                        {
+                            **self._serialize_function_call(function_call),
+                            "error": str(exc),
+                        },
+                    )
+                    raise
             if isinstance(fc_result, EnvState):
+                self._last_url = fc_result.url
+                self._emit_event(
+                    "function_call_finished",
+                    f"Completed {function_call.name}.",
+                    {
+                        **self._serialize_function_call(function_call),
+                        "status": "completed",
+                        "url": fc_result.url,
+                    },
+                )
                 function_responses.append(
                     FunctionResponse(
                         name=function_call.name,
@@ -347,6 +447,15 @@ class BrowserAgent:
                     )
                 )
             elif isinstance(fc_result, dict):
+                self._emit_event(
+                    "function_call_finished",
+                    f"Completed {function_call.name}.",
+                    {
+                        **self._serialize_function_call(function_call),
+                        "status": "completed",
+                        "result": fc_result,
+                    },
+                )
                 function_responses.append(
                     FunctionResponse(name=function_call.name, response=fc_result)
                 )
@@ -394,6 +503,8 @@ class BrowserAgent:
     ) -> Literal["CONTINUE", "TERMINATE"]:
         if safety["decision"] != "require_confirmation":
             raise ValueError(f"Unknown safety decision: safety['decision']")
+        if self._safety_mode == "terminate":
+            return "TERMINATE"
         termcolor.cprint(
             "Safety service requires explicit confirmation!",
             color="yellow",
@@ -409,8 +520,21 @@ class BrowserAgent:
 
     def agent_loop(self):
         status = "CONTINUE"
-        while status == "CONTINUE":
-            status = self.run_one_iteration()
+        self._emit_event(
+            "session_started",
+            "Session started.",
+            {"query": self._query, "model": self._model_name},
+        )
+        try:
+            while status == "CONTINUE":
+                status = self.run_one_iteration()
+        except Exception as exc:
+            self._emit_event(
+                "session_failed",
+                "Session failed.",
+                {"error": str(exc)},
+            )
+            raise
 
     def denormalize_x(self, x: int) -> int:
         return int(x / 1000 * self._browser_computer.screen_size()[0])

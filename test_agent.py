@@ -20,7 +20,8 @@ from agent import BrowserAgent, multiply_numbers
 from computers import EnvState
 
 class TestBrowserAgent(unittest.TestCase):
-    def setUp(self):
+    @patch("agent.genai.Client")
+    def setUp(self, mock_client):
         os.environ["GEMINI_API_KEY"] = "test_api_key"
         self.mock_browser_computer = MagicMock()
         self.mock_browser_computer.screen_size.return_value = (1000, 1000)
@@ -29,7 +30,6 @@ class TestBrowserAgent(unittest.TestCase):
             query="test query",
             model_name="test_model"
         )
-        # Mock the genai client
         self.agent._client = MagicMock()
 
     def test_multiply_numbers(self):
@@ -73,6 +73,22 @@ class TestBrowserAgent(unittest.TestCase):
     def test_denormalize_y(self):
         self.assertEqual(self.agent.denormalize_y(500), 500)
 
+    @patch("agent.genai.Client")
+    def test_api_key_is_passed_directly(self, mock_client):
+        BrowserAgent(
+            browser_computer=self.mock_browser_computer,
+            query="test query",
+            model_name="test_model",
+            api_key="direct-key",
+        )
+
+        mock_client.assert_called_with(
+            api_key="direct-key",
+            vertexai=False,
+            project=None,
+            location=None,
+        )
+
     @patch('agent.BrowserAgent.get_model_response')
     def test_run_one_iteration_no_function_calls(self, mock_get_model_response):
         mock_response = MagicMock()
@@ -105,6 +121,84 @@ class TestBrowserAgent(unittest.TestCase):
         self.assertEqual(result, "CONTINUE")
         mock_handle_action.assert_called_once_with(function_call)
         self.assertEqual(len(self.agent._contents), 3)
+
+    @patch('agent.BrowserAgent.get_model_response')
+    @patch('agent.BrowserAgent.handle_action')
+    def test_event_sink_receives_reasoning_and_function_events(self, mock_handle_action, mock_get_model_response):
+        events = []
+        agent = BrowserAgent(
+            browser_computer=self.mock_browser_computer,
+            query="test query",
+            model_name="test_model",
+            event_sink=events.append,
+            verbose=False,
+        )
+        agent._client = MagicMock()
+
+        mock_response = MagicMock()
+        function_call = types.FunctionCall(name="navigate", args={"url": "https://example.com"})
+        mock_candidate = MagicMock()
+        mock_candidate.content.parts = [
+            types.Part(text="Need to navigate"),
+            types.Part(function_call=function_call),
+        ]
+        mock_response.candidates = [mock_candidate]
+        mock_get_model_response.return_value = mock_response
+        mock_handle_action.return_value = EnvState(
+            screenshot=b"screenshot",
+            url="https://example.com",
+        )
+
+        result = agent.run_one_iteration()
+
+        self.assertEqual(result, "CONTINUE")
+        self.assertEqual(
+            [event.type for event in events],
+            [
+                "model_reasoning",
+                "function_calls_planned",
+                "function_call_started",
+                "function_call_finished",
+            ],
+        )
+
+    @patch('agent.BrowserAgent.get_model_response')
+    def test_safety_mode_terminate_emits_failure_event(self, mock_get_model_response):
+        events = []
+        agent = BrowserAgent(
+            browser_computer=self.mock_browser_computer,
+            query="test query",
+            model_name="test_model",
+            event_sink=events.append,
+            safety_mode="terminate",
+            verbose=False,
+        )
+        agent._client = MagicMock()
+
+        mock_response = MagicMock()
+        function_call = types.FunctionCall(
+            name="navigate",
+            args={
+                "url": "https://example.com",
+                "safety_decision": {
+                    "decision": "require_confirmation",
+                    "explanation": "Confirmation required.",
+                },
+            },
+        )
+        mock_candidate = MagicMock()
+        mock_candidate.content.parts = [types.Part(function_call=function_call)]
+        mock_response.candidates = [mock_candidate]
+        mock_get_model_response.return_value = mock_response
+
+        result = agent.run_one_iteration()
+
+        self.assertEqual(result, "COMPLETE")
+        self.assertEqual(events[-1].type, "session_failed")
+        self.assertEqual(
+            events[-1].data["reason"],
+            "safety_confirmation_required",
+        )
 
 
 if __name__ == "__main__":
