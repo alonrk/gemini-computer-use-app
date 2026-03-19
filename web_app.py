@@ -367,11 +367,21 @@ INDEX_HTML = """<!DOCTYPE html>
           <h2>Start Session</h2>
         </div>
         <form id="run-form">
-          <label for="api-key">
-            Gemini API key
-            <input id="api-key" name="api_key" type="password" autocomplete="off" required>
-            <span class="hint">The key is used for the current run only and is not persisted.</span>
-          </label>
+          <div style="display:flex;gap:12px;align-items:flex-start;">
+            <label for="api-key" style="flex:1;">
+              Gemini API key
+              <input id="api-key" name="api_key" type="password" autocomplete="off" required>
+              <span class="hint">The key is used for the current run only and is not persisted.</span>
+            </label>
+            <label for="model">
+              Model
+              <select id="model" name="model">
+                <option value="gemini-2.5-computer-use-preview-10-2025">gemini-2.5-computer-use-preview-10-2025</option>
+                <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
+                <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
+              </select>
+            </label>
+          </div>
 
           <label for="prompt">
             User prompt
@@ -406,6 +416,7 @@ INDEX_HTML = """<!DOCTYPE html>
     const form = document.getElementById("run-form");
     const apiKeyInput = document.getElementById("api-key");
     const promptInput = document.getElementById("prompt");
+    const modelSelect = document.getElementById("model");
     const runButton = document.getElementById("run-button");
     const exportButton = document.getElementById("export-button");
     const videoButton = document.getElementById("video-button");
@@ -418,7 +429,8 @@ INDEX_HTML = """<!DOCTYPE html>
     let socket;
     const STORAGE_KEYS = {
       apiKey: "computer-use-ui.api-key",
-      prompt: "computer-use-ui.prompt"
+      prompt: "computer-use-ui.prompt",
+      model: "computer-use-ui.model"
     };
 
     function formatData(data) {
@@ -554,6 +566,7 @@ INDEX_HTML = """<!DOCTYPE html>
     function restoreSavedInputs() {
       const savedApiKey = window.localStorage.getItem(STORAGE_KEYS.apiKey);
       const savedPrompt = window.localStorage.getItem(STORAGE_KEYS.prompt);
+      const savedModel = window.localStorage.getItem(STORAGE_KEYS.model);
 
       if (savedApiKey) {
         apiKeyInput.value = savedApiKey;
@@ -561,11 +574,15 @@ INDEX_HTML = """<!DOCTYPE html>
       if (savedPrompt) {
         promptInput.value = savedPrompt;
       }
+      if (savedModel) {
+        modelSelect.value = savedModel;
+      }
     }
 
     function saveInputs() {
       window.localStorage.setItem(STORAGE_KEYS.apiKey, apiKeyInput.value);
       window.localStorage.setItem(STORAGE_KEYS.prompt, promptInput.value);
+      window.localStorage.setItem(STORAGE_KEYS.model, modelSelect.value);
     }
 
     form.addEventListener("submit", async (event) => {
@@ -589,7 +606,7 @@ INDEX_HTML = """<!DOCTYPE html>
         const response = await fetch("/api/run", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ api_key: apiKey, prompt })
+          body: JSON.stringify({ api_key: apiKey, prompt, model: modelSelect.value })
         });
 
         const payload = await response.json();
@@ -641,6 +658,7 @@ INDEX_HTML = """<!DOCTYPE html>
 class RunRequest(BaseModel):
     api_key: str
     prompt: str
+    model: str = DEFAULT_MODEL
 
 
 class SessionManager:
@@ -866,7 +884,7 @@ def create_app(session_manager: SessionManager | None = None) -> FastAPI:
     @app.post("/api/run", status_code=202)
     async def run_session(request: RunRequest) -> dict[str, Any]:
         try:
-            manager.start_session(request.api_key, request.prompt)
+            manager.start_session(request.api_key, request.prompt, request.model)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:
